@@ -488,8 +488,76 @@ NANOTHREAD_EXPORT double task_time(Task *task) NANOTHREAD_THROW {
 
 Worker::Worker(Pool *pool, uint32_t id, bool ftz)
     : pool(pool), id(id), stop(false), ftz(ftz) {
+
+#if defined(_WIN32)
+
+    static std::once_flag affinity_initialized;
+    static std::vector<GROUP_AFFINITY> affinity_list;
+
+    std::call_once(affinity_initialized, []() {
+        DWORD len = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+        std::vector<uint8_t> buffer(len);
+        GetLogicalProcessorInformationEx(RelationProcessorCore, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buffer.data(), &len);
+
+        uint8_t *ptr = buffer.data();
+        uint8_t *end = ptr + len;
+
+        // Physical cores first (no SMT)
+        for (uint8_t *cursor = ptr; cursor < end;) {
+            auto procInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)cursor;
+            if (procInfo->Relationship == RelationProcessorCore && !(procInfo->Processor.Flags & LTP_PC_SMT)) {
+                for (size_t i = 0; i < procInfo->Processor.GroupCount; ++i) {
+                    KAFFINITY mask = procInfo->Processor.GroupMask[i].Mask;
+                    USHORT group = procInfo->Processor.GroupMask[i].Group;
+                    for (size_t bit = 0; bit < sizeof(KAFFINITY)*8; ++bit) {
+                        if (mask & (1ull << bit)) {
+                            GROUP_AFFINITY ga = {};
+                            ga.Mask = (1ull << bit);
+                            ga.Group = group;
+                            affinity_list.push_back(ga);
+                        }
+                    }
+                }
+            }
+            cursor += procInfo->Size;
+        }
+
+        // SMT cores explicitly afterward
+        for (uint8_t *cursor = ptr; cursor < end;) {
+            auto procInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)cursor;
+            if (procInfo->Relationship == RelationProcessorCore && (procInfo->Processor.Flags & LTP_PC_SMT)) {
+                for (size_t i = 0; i < procInfo->Processor.GroupCount; ++i) {
+                    KAFFINITY mask = procInfo->Processor.GroupMask[i].Mask;
+                    USHORT group = procInfo->Processor.GroupMask[i].Group;
+                    for (size_t bit = 0; bit < sizeof(KAFFINITY)*8; ++bit) {
+                        if (mask & (1ull << bit)) {
+                            GROUP_AFFINITY ga = {};
+                            ga.Mask = (1ull << bit);
+                            ga.Group = group;
+                            affinity_list.push_back(ga);
+                        }
+                    }
+                }
+            }
+            cursor += procInfo->Size;
+        }
+    });
+
     thread = std::thread(&Worker::run, this);
+
+    if (id <= affinity_list.size()) {
+        HANDLE handle = (HANDLE)thread.native_handle();
+        SetThreadGroupAffinity(handle, &affinity_list[id - 1], nullptr);
+    }
+
+#else // Non-Windows platforms unchanged
+
+    thread = std::thread(&Worker::run, this);
+
+#endif
 }
+
 
 Worker::~Worker() { thread.join(); }
 
