@@ -73,8 +73,15 @@ uint32_t core_count() {
     if (cached_core_count)
         return cached_core_count;
 
-    // Determine the number of present cores
+#if defined(_WIN32)
+    uint32_t ncores = 0;
+    USHORT groups = GetActiveProcessorGroupCount();
+    for (USHORT group = 0; group < groups; ++group)
+        ncores += GetActiveProcessorCount(group);
+#else
+	// Determine the number of present cores
     uint32_t ncores = std::thread::hardware_concurrency();
+#endif
 
 #if defined(__linux__)
     // Don't try to query CPU affinity if running inside Valgrind
